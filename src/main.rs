@@ -1,0 +1,363 @@
+mod number_input;
+
+use std::time::Duration;
+use std::io::{BufReader, Write};
+use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::layout::{Rect, Layout, Constraint, Direction};
+use ratatui::{DefaultTerminal, Frame};
+//use tracing::info;
+use std::time::Instant;
+use std::fs::File;
+use std::path::{Path};
+use serde_json;
+
+fn main() -> color_eyre::Result<()> {
+    ratatui::run(app)?;
+    Ok(())
+}
+
+#[derive(Debug, Default, PartialEq)]
+enum Pages {
+    #[default]
+    Settings,
+    Test,
+    Results,
+}
+
+#[derive(Debug,Default, PartialEq)]
+enum TestOptions {
+    #[default]
+    CharactersPerTarget,
+    PercentageOfMaskingCharacters,
+    DurationOfExperiment,
+    DelayBetweenCharacters,
+}
+
+impl TestOptions {
+
+    const ALL: [TestOptions; 4] = [
+        TestOptions::CharactersPerTarget,
+        TestOptions::PercentageOfMaskingCharacters,
+        TestOptions::DurationOfExperiment,
+        TestOptions::DelayBetweenCharacters,
+    ];
+
+    pub fn as_index(&self) -> usize {
+        match self {
+            TestOptions::CharactersPerTarget => 0,
+            TestOptions::PercentageOfMaskingCharacters => 1,
+            TestOptions::DurationOfExperiment => 2,
+            TestOptions::DelayBetweenCharacters => 3,
+        }
+    }
+
+    pub fn prev(&self) -> TestOptions {
+        match self {
+            TestOptions::CharactersPerTarget => TestOptions::CharactersPerTarget,
+            TestOptions::PercentageOfMaskingCharacters => TestOptions::CharactersPerTarget,
+            TestOptions::DurationOfExperiment => TestOptions::PercentageOfMaskingCharacters,
+            TestOptions::DelayBetweenCharacters => TestOptions::DurationOfExperiment,
+        }
+    }
+
+    pub fn next(&self) -> TestOptions {
+        match self {
+            TestOptions::CharactersPerTarget => TestOptions::PercentageOfMaskingCharacters,
+            TestOptions::PercentageOfMaskingCharacters => TestOptions::DurationOfExperiment,
+            TestOptions::DurationOfExperiment => TestOptions::DelayBetweenCharacters,
+            TestOptions::DelayBetweenCharacters => TestOptions::DelayBetweenCharacters,
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        match self {
+            TestOptions::CharactersPerTarget           => "Characters per target (3000 .. 30000)",
+            TestOptions::PercentageOfMaskingCharacters => "Percentage of masking characters (1 .. 100)",
+            TestOptions::DurationOfExperiment          => "Duration of experiment <minutes> (1 .. 60)",
+            TestOptions::DelayBetweenCharacters        => "Delay between characters <ms> (0 .. 3000)",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct App {
+    test_str : Vec<char>,
+    ticks : u64,
+    quit_app : bool,
+    pause : bool,
+    space_presses : Vec<Instant>,
+    characters_per_comma : usize,
+    characters_mod : usize,
+    page : Pages,
+    tick_rate : u64,
+    term_cols : u16,
+    term_rows : u16,
+    masking_odds : u16,
+    comma_added : Vec<Instant>,
+    comma_removed : Vec<Instant>,
+    tabulated : bool,
+    misses : u16,
+    hits : u16,
+    false_hits : usize,
+    test_duration : u16,
+    time_started : Option<Instant>,
+    selected_option : TestOptions,
+    character_delay : Duration,
+    inputs : [number_input::NumberInput; 4],
+    config_file : Option<File>,
+}
+
+impl App {
+    pub fn handle_events(&mut self, timeout: &Duration) -> std::io::Result<()> {
+        if crossterm::event::poll(*timeout)? {
+            match crossterm::event::read() {
+                Ok(evt) =>
+                    match evt {
+                        crossterm::event::Event::Key(key) => {
+                            match self.page {
+                                Pages::Settings => {
+                                    if key.kind == crossterm::event::KeyEventKind::Press {
+                                        match key.code {
+                                            crossterm::event::KeyCode::Char('q') => self.quit_app = true,
+                                            crossterm::event::KeyCode::Up => self.selected_option = self.selected_option.prev(),
+                                            crossterm::event::KeyCode::Down => self.selected_option = self.selected_option.next(),
+                                            crossterm::event::KeyCode::Enter => {
+                                                if self.inputs.iter().all(|x| x.in_range()) {
+                                                    self.characters_per_comma = self.inputs[0].value.parse::<usize>().unwrap();
+                                                    self.masking_odds = self.inputs[1].value.parse::<u16>().unwrap();
+                                                    self.test_duration = self.inputs[2].value.parse::<u16>().unwrap();
+                                                    self.time_started = Some(Instant::now());
+                                                    self.character_delay = Duration::from_millis(self.inputs[3].value.parse::<u64>().unwrap());
+
+                                                    match &mut self.config_file {
+                                                        Some(f) => {
+                                                            f.write(serde_json::to_string(&self.inputs).unwrap().as_bytes())?;
+                                                            //info!("wrote to file!");
+                                                        }
+                                                        None => {
+                                                            //info!("did not write to file!")
+                                                        },
+                                                    }
+                                                    self.page = Pages::Test;
+                                                }
+                                            }
+                                            _ => {
+                                                self.inputs[self.selected_option.as_index()].handle_key(&key);
+                                            }
+                                        }
+                                    }
+                                }
+                                Pages::Test => {
+
+                                    if key.kind == crossterm::event::KeyEventKind::Press {
+                                        match key.code {
+                                            crossterm::event::KeyCode::Char('q') => self.quit_app = true,
+                                            crossterm::event::KeyCode::Char(' ') => self.space_presses.push(Instant::now()),
+                                            //crossterm::event::KeyCode::Char('p') => self.pause = !self.pause,
+                                            _ => () 
+                                        }
+                                    }
+                                }
+                                Pages::Results => {
+                                    match key.code {
+                                        crossterm::event::KeyCode::Char('q') => self.quit_app = true,
+                                        _ => ()
+                                    }
+                                }
+                            }
+                        },
+                        crossterm::event::Event::Resize(x, y ) => {
+                            self.term_cols = x;
+                            self.term_rows = y;
+                        }
+                        _ => {}
+                    }
+                Err(e) => return Err(e)
+            }
+        }
+        Ok(())
+    }
+    
+}
+
+fn update_model(model: &mut App){
+    if !model.pause && model.page == Pages::Test {
+        model.ticks += 1;
+
+        if model.time_started.unwrap().elapsed() > Duration::from_mins(u64::from(model.test_duration)) {
+            model.page = Pages::Results;
+        } else if model.ticks % model.tick_rate == 0 {
+
+            if model.characters_mod == model.characters_per_comma - 1 {
+                model.test_str.push('o');
+                model.comma_added.push(Instant::now());
+            } else {
+                let chance = rand::random_range(1..100);
+                if chance <= model.masking_odds {
+                    model.test_str.push(';');
+                } else {
+                    // using space-looking non-space so ratatui doesn't wrap "words"
+                    model.test_str.push('\u{00A0}');
+                }
+            }
+
+            model.characters_mod = (model.characters_mod + 1) % model.characters_per_comma;
+
+            if u16::try_from(model.test_str.len()).unwrap() == (model.term_cols * model.term_rows) {
+                let vec_to_check = model.test_str[ .. usize::from(model.term_cols)].to_vec();
+                if vec_to_check.contains(&'o') {
+                    model.comma_removed.push(Instant::now());
+                }
+                // info!("shifted at {:?}", u16::try_from(model.test_str.len()).unwrap());
+                model.test_str = model.test_str[usize::from(model.term_cols) .. ].to_vec();
+
+            }
+        }
+    }
+
+    if model.page == Pages::Results && !model.tabulated {
+        model.tabulated = true;
+
+
+        while model.comma_added.len() > model.comma_removed.len() {
+            model.comma_removed.push(Instant::now());
+        }
+
+        for (comma_start, comma_end) in model.comma_added.iter().zip(model.comma_removed.iter()) {
+            // If there is a space between the two instants...
+            if let Some(index) = model.space_presses.iter().position(|x| comma_start < x && comma_end > x) {
+                // ... remove the space so it doesn't count for any others
+                model.space_presses.remove(index);
+                model.hits += 1;
+            } else {
+                model.misses += 1;
+            }
+        }
+
+        model.false_hits = model.space_presses.len();
+
+    }
+}
+
+fn app(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+    let log_file = File::create("debug.log")?;
+
+    tracing_subscriber::fmt().with_writer(log_file).init();
+
+    let mut model = App::default();
+    model.term_cols = terminal.size()?.width;
+    model.term_rows = terminal.size()?.height;
+    model.characters_per_comma = 100;
+    model.tick_rate = 10;
+    model.masking_odds = 50;
+    model.test_duration = 1;
+    model.time_started = Some(Instant::now());
+    model.inputs[0].value = "3000".to_string();
+    model.inputs[0].with_range(3000 ..=30000);
+    model.inputs[1].value = "1".to_string();
+    model.inputs[1].with_range(1 ..=100);
+    model.inputs[2].value = "1".to_string();
+    model.inputs[2].with_range(1 ..=60);
+    model.inputs[3].value = "0".to_string();
+    model.inputs[3].with_range(0 ..=3000);
+    //info!("starting width: {:?}\nstarting height: {:?}", model.term_cols, model.term_rows);
+    model.character_delay = Duration::from_millis(10);
+
+    if Path::new("config.txt").exists() {
+        let cfile = File::open("config.txt")?;
+        let reader = BufReader::new(cfile);
+        model.inputs = serde_json::from_reader(reader)?;
+    } 
+
+    model.config_file = Some(File::create("config.txt")?);
+
+    let mut last_tick = Instant::now();
+    loop {
+        //let start = Instant::now();
+        if last_tick.elapsed() >= model.character_delay {
+            last_tick = Instant::now();
+            
+            update_model(&mut model);
+            terminal.draw(|frame| {render(frame, &model)})?;
+            
+            if model.quit_app {
+                return Ok(())
+            }
+            
+        }
+        let timeout = model.character_delay
+                                .checked_sub(last_tick.elapsed())
+                                .unwrap_or(Duration::ZERO);
+        model.handle_events(&timeout)?;
+            
+        //info!("Loop time: {:?}", start.elapsed().checked_sub(model.character_delay));
+    }
+}
+
+fn render(frame: &mut Frame, model: &App) {
+
+    match &model.page {
+        Pages::Settings => {
+            let outer_layout: [Rect; 12] = Layout::default()
+                                 .direction(Direction::Vertical)
+                                 .constraints(vec![
+                                    Constraint::Ratio(1, 12),
+                                    Constraint::Ratio(1, 12),
+                                    Constraint::Ratio(1, 12),
+                                    Constraint::Ratio(1, 12),
+                                    Constraint::Ratio(1, 12),
+                                    Constraint::Ratio(1, 12),
+                                    Constraint::Ratio(1, 12),
+                                    Constraint::Ratio(1, 12),
+                                    Constraint::Ratio(1, 12),
+                                    Constraint::Ratio(1, 12),
+                                    Constraint::Ratio(1, 12),
+                                    Constraint::Ratio(1, 12),
+                                 ])
+                                 .areas(Rect::new(0,0,frame.area().width,12));
+            for (i, s) in TestOptions::ALL.iter().enumerate() {
+                let columns = Layout::horizontal([
+                    Constraint::Percentage(50),
+                    Constraint::Percentage(50),
+                ])
+                .split(outer_layout[(i * 3) + 1]);
+                let setting_desc = Paragraph::new(s.as_str());
+                frame.render_widget(setting_desc, columns[0].centered_vertically(Constraint::Ratio(1, 2)));
+                model.inputs[i].render(frame, columns[1], model.selected_option == *s);
+            }
+
+            let explanation = Paragraph::new("q: quit\nEnter: begin testing.");
+
+            let explanation_rect = Rect::new(outer_layout[outer_layout.len() - 1].left(), 
+                                                   outer_layout[outer_layout.len() - 1].bottom(), 
+                                                      outer_layout[outer_layout.len() - 1].width,
+                                                      2);
+
+            frame.render_widget(explanation, explanation_rect);
+
+        },
+        Pages::Test => {
+            let debug_str = model.test_str.clone();
+            let paragraph = Paragraph::new(debug_str.iter().collect::<String>())
+                                                         .wrap(Wrap {trim: false});
+            frame.render_widget(paragraph, frame.area());
+        },
+        Pages::Results => {
+            // There is almost certainly a better way to build these up...
+            let hits_rect = Rect::new(0,0, frame.area().width, 1);
+            let misses_rect = Rect::new(0,1, frame.area().width, 1);
+            let false_hits_rect = Rect::new(0,2, frame.area().width, 1);
+            let hits_str = format!("Hits: {}", model.hits);
+            let misses_str = format!("Misses: {}", model.misses);
+            let false_hits_str = format!("False Hits: {}", model.false_hits);
+            let hits_paragraph = Paragraph::new(hits_str);
+            let misses_paragraph = Paragraph::new(misses_str);
+            let false_hits_paragraph = Paragraph::new(false_hits_str);
+            frame.render_widget(hits_paragraph, hits_rect);
+            frame.render_widget(misses_paragraph, misses_rect);
+            frame.render_widget(false_hits_paragraph, false_hits_rect);
+
+        }
+    }
+
+}
