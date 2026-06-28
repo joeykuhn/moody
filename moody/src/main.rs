@@ -3,7 +3,7 @@ mod number_input;
 use std::time::Duration;
 use std::io::{BufReader, Write};
 use ratatui::widgets::{Paragraph, Wrap};
-use ratatui::layout::{Rect, Layout, Constraint, Direction};
+use ratatui::layout::{Rect, Layout, Constraint};
 use ratatui::{DefaultTerminal, Frame};
 //use tracing::info;
 use std::time::Instant;

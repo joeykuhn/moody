@@ -1,4 +1,4 @@
 /target
 Cargo.lock
-src/config.txt
-src/debug.log
+config.txt
+debug.log
