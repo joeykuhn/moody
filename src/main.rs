@@ -11,6 +11,8 @@ use std::fs::File;
 use std::path::{Path};
 use serde_json;
 
+use crate::number_input::NumberInput;
+
 fn main() -> color_eyre::Result<()> {
     ratatui::run(app)?;
     Ok(())
@@ -103,7 +105,7 @@ struct App {
     time_started : Option<Instant>,
     selected_option : TestOptions,
     character_delay : Duration,
-    inputs : [number_input::NumberInput; 4],
+    inputs : [number_input::NumberInput; 4], // the number of TestOptions
     config_file : Option<File>,
 }
 
@@ -131,7 +133,7 @@ impl App {
 
                                                     match &mut self.config_file {
                                                         Some(f) => {
-                                                            f.write(serde_json::to_string(&self.inputs).unwrap().as_bytes())?;
+                                                            f.write(&serde_json::to_vec(&self.inputs).unwrap())?;
                                                             //info!("wrote to file!");
                                                         }
                                                         None => {
@@ -154,7 +156,7 @@ impl App {
                                             crossterm::event::KeyCode::Char('q') => self.quit_app = true,
                                             crossterm::event::KeyCode::Char(' ') => self.space_presses.push(Instant::now()),
                                             //crossterm::event::KeyCode::Char('p') => self.pause = !self.pause,
-                                            _ => () 
+                                            _ => ()
                                         }
                                     }
                                 }
@@ -177,7 +179,7 @@ impl App {
         }
         Ok(())
     }
-    
+
 }
 
 fn update_model(model: &mut App){
@@ -189,7 +191,7 @@ fn update_model(model: &mut App){
         } else if model.ticks % model.tick_rate == 0 {
 
             if model.characters_mod == model.characters_per_comma - 1 {
-                model.test_str.push('o');
+                model.test_str.push(',');
                 model.comma_added.push(Instant::now());
             } else {
                 let chance = rand::random_range(1..100);
@@ -205,7 +207,7 @@ fn update_model(model: &mut App){
 
             if u16::try_from(model.test_str.len()).unwrap() == (model.term_cols * model.term_rows) {
                 let vec_to_check = model.test_str[ .. usize::from(model.term_cols)].to_vec();
-                if vec_to_check.contains(&'o') {
+                if vec_to_check.contains(&',') {
                     model.comma_removed.push(Instant::now());
                 }
                 // info!("shifted at {:?}", u16::try_from(model.test_str.len()).unwrap());
@@ -239,6 +241,21 @@ fn update_model(model: &mut App){
     }
 }
 
+fn create_config(invec : &[NumberInput; 4], config_path : &Path) -> Result<Option<File>, std::io::Error> {
+
+    match File::create(config_path) {
+        Ok(mut cfile) => {
+            if let Ok(inputs_json) = serde_json::to_string(invec) {
+                cfile.write(inputs_json.as_bytes())?;
+                Ok(Some(cfile))
+            } else { // inputs vector could not be serialized, TODO: output this somewhere
+                Ok(None)
+            }
+        }
+        Err(e) => Err(e)
+    }
+}
+
 fn app(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     let log_file = File::create("debug.log")?;
 
@@ -260,36 +277,41 @@ fn app(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     model.inputs[2].with_range(1 ..=60);
     model.inputs[3].value = "0".to_string();
     model.inputs[3].with_range(0 ..=3000);
-    //info!("starting width: {:?}\nstarting height: {:?}", model.term_cols, model.term_rows);
     model.character_delay = Duration::from_millis(10);
 
-    if Path::new("config.txt").exists() {
-        let cfile = File::open("config.txt")?;
-        let reader = BufReader::new(cfile);
-        model.inputs = serde_json::from_reader(reader)?;
-    } 
+    let config_path = Path::new("config.txt");
 
-    model.config_file = Some(File::create("config.txt")?);
+    if let Ok(cfile) = File::open(config_path) {
+        let reader = BufReader::new(&cfile);
+        if let Ok(mi) = serde_json::from_reader(reader) {
+            model.inputs = mi;
+            model.config_file = Some(File::create(config_path)?);
+        } else { // if deserialization failed
+            model.config_file = create_config(&model.inputs, config_path)?;
+        }
+    } else { //could not open config file (likely due to nonexistence)
+        model.config_file = create_config(&model.inputs, config_path)?;
+    }
 
     let mut last_tick = Instant::now();
     loop {
         //let start = Instant::now();
         if last_tick.elapsed() >= model.character_delay {
             last_tick = Instant::now();
-            
+
             update_model(&mut model);
             terminal.draw(|frame| {render(frame, &model)})?;
-            
+
             if model.quit_app {
                 return Ok(())
             }
-            
+
         }
         let timeout = model.character_delay
                                 .checked_sub(last_tick.elapsed())
                                 .unwrap_or(Duration::ZERO);
         model.handle_events(&timeout)?;
-            
+
         //info!("Loop time: {:?}", start.elapsed().checked_sub(model.character_delay));
     }
 }
@@ -298,40 +320,25 @@ fn render(frame: &mut Frame, model: &App) {
 
     match &model.page {
         Pages::Settings => {
-            let outer_layout: [Rect; 12] = Layout::default()
-                                 .direction(Direction::Vertical)
-                                 .constraints(vec![
-                                    Constraint::Ratio(1, 12),
-                                    Constraint::Ratio(1, 12),
-                                    Constraint::Ratio(1, 12),
-                                    Constraint::Ratio(1, 12),
-                                    Constraint::Ratio(1, 12),
-                                    Constraint::Ratio(1, 12),
-                                    Constraint::Ratio(1, 12),
-                                    Constraint::Ratio(1, 12),
-                                    Constraint::Ratio(1, 12),
-                                    Constraint::Ratio(1, 12),
-                                    Constraint::Ratio(1, 12),
-                                    Constraint::Ratio(1, 12),
-                                 ])
-                                 .areas(Rect::new(0,0,frame.area().width,12));
+            let mut working_row = 1;
             for (i, s) in TestOptions::ALL.iter().enumerate() {
-                let columns = Layout::horizontal([
-                    Constraint::Percentage(50),
-                    Constraint::Percentage(50),
-                ])
-                .split(outer_layout[(i * 3) + 1]);
+                let setting_area = Rect::new(0, working_row, frame.area().width, 1);
+                let columns: [Rect; 4] = Layout::horizontal([
+                    Constraint::Length(45), // description of setting
+                    Constraint::Length(10), // buffer space
+                    Constraint::Length(4),  // input
+                    Constraint::Fill(1),    // buffer after input
+                ]).areas(setting_area);
                 let setting_desc = Paragraph::new(s.as_str());
-                frame.render_widget(setting_desc, columns[0].centered_vertically(Constraint::Ratio(1, 2)));
-                model.inputs[i].render(frame, columns[1], model.selected_option == *s);
+                frame.render_widget(setting_desc, columns[0]);
+                model.inputs[i].render(frame, columns[2], model.selected_option == *s);
+
+                working_row += 2;
             }
 
             let explanation = Paragraph::new("q: quit\nEnter: begin testing.");
 
-            let explanation_rect = Rect::new(outer_layout[outer_layout.len() - 1].left(), 
-                                                   outer_layout[outer_layout.len() - 1].bottom(), 
-                                                      outer_layout[outer_layout.len() - 1].width,
-                                                      2);
+            let explanation_rect = Rect::new(0, working_row, 21, 2);
 
             frame.render_widget(explanation, explanation_rect);
 
