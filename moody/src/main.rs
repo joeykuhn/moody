@@ -8,7 +8,7 @@ use ratatui::{DefaultTerminal, Frame};
 //use tracing::info;
 use std::time::Instant;
 use std::fs::File;
-use std::path::{Path};
+use std::path::{Path, PathBuf};
 use serde_json;
 
 use crate::number_input::NumberInput;
@@ -82,6 +82,12 @@ impl TestOptions {
 }
 
 #[derive(Debug, Default)]
+struct OutputRecord {
+    time : String,
+    event : String,
+}
+
+#[derive(Debug, Default)]
 struct App {
     test_str : Vec<char>,
     ticks : u64,
@@ -107,6 +113,8 @@ struct App {
     character_delay : Duration,
     inputs : [number_input::NumberInput; 4], // the number of TestOptions
     config_file : Option<File>,
+    output_file : PathBuf,
+    events : Vec<OutputRecord>
 }
 
 impl App {
@@ -154,7 +162,15 @@ impl App {
                                     if key.kind == crossterm::event::KeyEventKind::Press {
                                         match key.code {
                                             crossterm::event::KeyCode::Char('q') => self.quit_app = true,
-                                            crossterm::event::KeyCode::Char(' ') => self.space_presses.push(Instant::now()),
+                                            crossterm::event::KeyCode::Char(' ') => {
+                                                let inst = Instant::now();
+                                                self.space_presses.push(inst);
+                                                let dur_secs = (inst - self.time_started.unwrap()).as_secs();
+                                                let dur_millis = (inst - self.time_started.unwrap()).subsec_millis();
+                                                self.events.push(OutputRecord {
+                                                    time  : format!("{dur_secs}.{dur_millis}"),
+                                                    event : "space pressed".to_string()});
+                                            },
                                             //crossterm::event::KeyCode::Char('p') => self.pause = !self.pause,
                                             _ => ()
                                         }
@@ -192,7 +208,13 @@ fn update_model(model: &mut App){
 
             if model.characters_mod == model.characters_per_comma - 1 {
                 model.test_str.push(',');
-                model.comma_added.push(Instant::now());
+                let inst = Instant::now();
+                model.comma_added.push(inst);
+                let dur_secs = (inst - model.time_started.unwrap()).as_secs();
+                let dur_millis = (inst - model.time_started.unwrap()).subsec_millis();
+                model.events.push(OutputRecord {
+                                    time  : format!("{dur_secs}.{dur_millis}"),
+                                    event : "comma added".to_string()});
             } else {
                 let chance = rand::random_range(1..100);
                 if chance <= model.masking_odds {
@@ -208,7 +230,13 @@ fn update_model(model: &mut App){
             if u16::try_from(model.test_str.len()).unwrap() == (model.term_cols * model.term_rows) {
                 let vec_to_check = model.test_str[ .. usize::from(model.term_cols)].to_vec();
                 if vec_to_check.contains(&',') {
-                    model.comma_removed.push(Instant::now());
+                    let inst = Instant::now();
+                    model.comma_removed.push(inst);
+                    let dur_secs = (inst - model.time_started.unwrap()).as_secs();
+                    let dur_millis = (inst - model.time_started.unwrap()).subsec_millis();
+                    model.events.push(OutputRecord {
+                                        time  : format!("{dur_secs}.{dur_millis}"),
+                                        event : "comma removed".to_string()});
                 }
                 // info!("shifted at {:?}", u16::try_from(model.test_str.len()).unwrap());
                 model.test_str = model.test_str[usize::from(model.term_cols) .. ].to_vec();
@@ -220,13 +248,23 @@ fn update_model(model: &mut App){
     if model.page == Pages::Results && !model.tabulated {
         model.tabulated = true;
 
-
+        // if the program ended with commas still on the screen, the two lists will not have the same length.
         while model.comma_added.len() > model.comma_removed.len() {
-            model.comma_removed.push(Instant::now());
+            let inst = Instant::now();
+            model.comma_removed.push(inst);
+            let dur_secs = (inst - model.time_started.unwrap()).as_secs();
+            let dur_millis = (inst - model.time_started.unwrap()).subsec_millis();
+            model.events.push(OutputRecord {
+                                time  : format!("{dur_secs}.{dur_millis}"),
+                                event : "comma removed".to_string()});
+        }
+
+        if let Ok(of) = File::create(&model.output_file) {
+            // TODO: write model.events as csv to output file
         }
 
         for (comma_start, comma_end) in model.comma_added.iter().zip(model.comma_removed.iter()) {
-            // If there is a space between the two instants...
+            // If there is a space between the two comma instants...
             if let Some(index) = model.space_presses.iter().position(|x| comma_start < x && comma_end > x) {
                 // ... remove the space so it doesn't count for any others
                 model.space_presses.remove(index);
@@ -278,6 +316,18 @@ fn app(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     model.inputs[3].value = "0".to_string();
     model.inputs[3].with_range(0 ..=3000);
     model.character_delay = Duration::from_millis(10);
+
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if arg == "--output-dir" {
+            let output_arg = match args.next() {
+                Some(a) => a,
+                None => "output/".to_string()
+            };
+            let filename = chrono::Local::now().to_string();
+            model.output_file = PathBuf::from(output_arg).join(filename);
+        }
+    }
 
     let config_path = Path::new("config.txt");
 

@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+chrono = "0.4.45"
 color-eyre = "0.6.5"
 crossterm = "0.29.0"
+csv = "1.4.0"
 rand = "0.10.1"
 ratatui = "0.30.0"
 serde = { version = "1.0.228", features = ["derive"] }
