@@ -7,7 +7,7 @@ use ratatui::layout::{Rect, Layout, Constraint};
 use ratatui::{DefaultTerminal, Frame};
 use tracing::info;
 use std::time::Instant;
-use std::fs::File;
+use std::fs::{self, File};
 use std::path::{PathBuf};
 use serde_json;
 
@@ -269,16 +269,20 @@ fn update_model(model: &mut App){
         model.false_hits = model.space_presses.len();
 
         if let Some(of) = model.output_dir.as_mut() {
-            let of_with_results = of.join(format!("{}_{}_{}_{}.csv", model.output_filename, model.hits, model.misses, model.false_hits));
-            if let Ok(of) = File::create(of_with_results) {
-                info!("writing to {:?}", of);
-                let mut writer = csv::Writer::from_writer(of);
-                for e in model.events.iter() {
-                    writer.serialize(e).unwrap();
-                }
-                writer.flush().unwrap();
+            if let Err(e) = fs::create_dir_all(&of) {
+                info!("Could not create output directory: {}", e);
             } else {
-                info!("failed to create output file - does the output folder exist?");
+                let of_with_results = of.join(format!("{}_{}_{}_{}.csv", model.output_filename, model.hits, model.misses, model.false_hits));
+                if let Ok(of) = File::create(of_with_results) {
+                    info!("writing to {:?}", of);
+                    let mut writer = csv::Writer::from_writer(of);
+                    for e in model.events.iter() {
+                        writer.serialize(e).unwrap();
+                    }
+                    writer.flush().unwrap();
+                } else {
+                    info!("failed to create output file - does the output folder exist?");
+                }
             }
         }
 
