@@ -5,10 +5,10 @@ use std::io::{BufReader, Write};
 use ratatui::widgets::{Paragraph, Wrap};
 use ratatui::layout::{Rect, Layout, Constraint};
 use ratatui::{DefaultTerminal, Frame};
-//use tracing::info;
+use tracing::info;
 use std::time::Instant;
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::{PathBuf};
 use serde_json;
 
 use crate::number_input::NumberInput;
@@ -81,7 +81,7 @@ impl TestOptions {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize)]
 struct OutputRecord {
     time : String,
     event : String,
@@ -112,8 +112,9 @@ struct App {
     selected_option : TestOptions,
     character_delay : Duration,
     inputs : [number_input::NumberInput; 4], // the number of TestOptions
-    config_file : Option<File>,
-    output_file : PathBuf,
+    config_file : PathBuf,
+    output_dir : Option<PathBuf>,
+    output_filename : String,
     events : Vec<OutputRecord>
 }
 
@@ -139,14 +140,9 @@ impl App {
                                                     self.time_started = Some(Instant::now());
                                                     self.character_delay = Duration::from_millis(self.inputs[3].value.parse::<u64>().unwrap());
 
-                                                    match &mut self.config_file {
-                                                        Some(f) => {
-                                                            f.write(&serde_json::to_vec(&self.inputs).unwrap())?;
-                                                            //info!("wrote to file!");
-                                                        }
-                                                        None => {
-                                                            //info!("did not write to file!")
-                                                        },
+                                                    match File::create(&self.config_file) {
+                                                        Ok(mut cf) => {cf.write(&serde_json::to_vec(&self.inputs).unwrap())?;}
+                                                        Err(e) => {info!("Could not create config file: {:?}", e);}
                                                     }
                                                     self.page = Pages::Test;
                                                 }
@@ -169,7 +165,7 @@ impl App {
                                                 let dur_millis = (inst - self.time_started.unwrap()).subsec_millis();
                                                 self.events.push(OutputRecord {
                                                     time  : format!("{dur_secs}.{dur_millis}"),
-                                                    event : "space pressed".to_string()});
+                                                    event : "input pressed".to_string()});
                                             },
                                             //crossterm::event::KeyCode::Char('p') => self.pause = !self.pause,
                                             _ => ()
@@ -214,7 +210,7 @@ fn update_model(model: &mut App){
                 let dur_millis = (inst - model.time_started.unwrap()).subsec_millis();
                 model.events.push(OutputRecord {
                                     time  : format!("{dur_secs}.{dur_millis}"),
-                                    event : "comma added".to_string()});
+                                    event : "target added".to_string()});
             } else {
                 let chance = rand::random_range(1..100);
                 if chance <= model.masking_odds {
@@ -236,7 +232,7 @@ fn update_model(model: &mut App){
                     let dur_millis = (inst - model.time_started.unwrap()).subsec_millis();
                     model.events.push(OutputRecord {
                                         time  : format!("{dur_secs}.{dur_millis}"),
-                                        event : "comma removed".to_string()});
+                                        event : "target removed".to_string()});
                 }
                 // info!("shifted at {:?}", u16::try_from(model.test_str.len()).unwrap());
                 model.test_str = model.test_str[usize::from(model.term_cols) .. ].to_vec();
@@ -256,11 +252,7 @@ fn update_model(model: &mut App){
             let dur_millis = (inst - model.time_started.unwrap()).subsec_millis();
             model.events.push(OutputRecord {
                                 time  : format!("{dur_secs}.{dur_millis}"),
-                                event : "comma removed".to_string()});
-        }
-
-        if let Ok(of) = File::create(&model.output_file) {
-            // TODO: write model.events as csv to output file
+                                event : "target removed".to_string()});
         }
 
         for (comma_start, comma_end) in model.comma_added.iter().zip(model.comma_removed.iter()) {
@@ -276,18 +268,33 @@ fn update_model(model: &mut App){
 
         model.false_hits = model.space_presses.len();
 
+        if let Some(of) = model.output_dir.as_mut() {
+            let of_with_results = of.join(format!("{}_{}_{}_{}.csv", model.output_filename, model.hits, model.misses, model.false_hits));
+            if let Ok(of) = File::create(of_with_results) {
+                info!("writing to {:?}", of);
+                let mut writer = csv::Writer::from_writer(of);
+                for e in model.events.iter() {
+                    writer.serialize(e).unwrap();
+                }
+                writer.flush().unwrap();
+            } else {
+                info!("failed to create output file - does the output folder exist?");
+            }
+        }
+
     }
 }
 
-fn create_config(invec : &[NumberInput; 4], config_path : &Path) -> Result<Option<File>, std::io::Error> {
+fn create_config(invec : &[NumberInput; 4], config_path : &PathBuf) -> Result<(), std::io::Error> {
 
     match File::create(config_path) {
         Ok(mut cfile) => {
             if let Ok(inputs_json) = serde_json::to_string(invec) {
                 cfile.write(inputs_json.as_bytes())?;
-                Ok(Some(cfile))
-            } else { // inputs vector could not be serialized, TODO: output this somewhere
-                Ok(None)
+                Ok(())
+            } else {
+                info!("Inputs vector could not be serialized!");
+                Ok(())
             }
         }
         Err(e) => Err(e)
@@ -316,36 +323,56 @@ fn app(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
     model.inputs[3].value = "0".to_string();
     model.inputs[3].with_range(0 ..=3000);
     model.character_delay = Duration::from_millis(10);
+    model.config_file = PathBuf::from("config.txt");
 
     let mut args = std::env::args();
+
+    info!("{:?}", args);
+
     while let Some(arg) = args.next() {
         if arg == "--output-dir" {
             let output_arg = match args.next() {
                 Some(a) => a,
-                None => "output/".to_string()
+                None => "./output/".to_string()
             };
-            let filename = chrono::Local::now().to_string();
-            model.output_file = PathBuf::from(output_arg).join(filename);
+            model.output_filename = chrono::Local::now().format("%Y-%m-%d_%H-%M").to_string();
+            model.output_dir = Some(PathBuf::from(output_arg));
+        } else if arg == "--config-file" {
+            model.config_file = match args.next() {
+                Some(c) => PathBuf::from(c),
+                None => PathBuf::from("config.txt"),
+            };
         }
     }
 
-    let config_path = Path::new("config.txt");
+    info!("output directory: {:?}", model.output_dir);
+    info!("output filename: {:?}", model.output_filename);
+    info!("config file: {:?}", model.config_file);
 
-    if let Ok(cfile) = File::open(config_path) {
+    let mut create_config_file = false;
+    if let Ok(cfile) = File::open(&model.config_file) {
         let reader = BufReader::new(&cfile);
-        if let Ok(mi) = serde_json::from_reader(reader) {
-            model.inputs = mi;
-            model.config_file = Some(File::create(config_path)?);
-        } else { // if deserialization failed
-            model.config_file = create_config(&model.inputs, config_path)?;
+        match serde_json::from_reader(reader) {
+            Ok(mi) => {
+                info!("reading from config file");
+                model.inputs = mi;
+            },
+            Err(e) => {
+                info!("malformed config file, overwriting because {:?}", e);
+                create_config_file = true;
+            }
         }
     } else { //could not open config file (likely due to nonexistence)
-        model.config_file = create_config(&model.inputs, config_path)?;
+        info!("no config file found, creating one");
+        create_config_file = true;
+    }
+
+    if create_config_file {
+        create_config(&model.inputs, &model.config_file)?;
     }
 
     let mut last_tick = Instant::now();
     loop {
-        //let start = Instant::now();
         if last_tick.elapsed() >= model.character_delay {
             last_tick = Instant::now();
 
@@ -353,6 +380,11 @@ fn app(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
             terminal.draw(|frame| {render(frame, &model)})?;
 
             if model.quit_app {
+                if model.time_started.is_some() {
+                    info!("Average tick time: {} microseconds", model.time_started.unwrap().elapsed().as_micros() / model.ticks as u128);
+                    info!("length of test: {:?} microseconds", model.time_started.unwrap().elapsed().as_micros());
+                    info!("number of ticks: {}", model.ticks);
+                }
                 return Ok(())
             }
 
@@ -361,8 +393,6 @@ fn app(terminal: &mut DefaultTerminal) -> std::io::Result<()> {
                                 .checked_sub(last_tick.elapsed())
                                 .unwrap_or(Duration::ZERO);
         model.handle_events(&timeout)?;
-
-        //info!("Loop time: {:?}", start.elapsed().checked_sub(model.character_delay));
     }
 }
 

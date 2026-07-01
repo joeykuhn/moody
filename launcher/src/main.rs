@@ -19,7 +19,7 @@ fn main() -> Result<(), std::io::Error> {
         .arg(&alacritty_config)
         .arg("-e")
         .arg(&moody)
-        .arg("--output-file")
+        .arg("--output-dir")
         .arg(&output_folder)
         .current_dir(&moody_folder)
         .spawn()?;
